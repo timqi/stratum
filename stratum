@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+
+import argparse
+import asyncio
+import json
+import logging
+
+logging.basicConfig(
+    format="[%(asctime)s] %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("stratum")
+logger.setLevel(logging.DEBUG)
+
+log_upstream = lambda msg, host="": logger.info("%s%s--> %s%s", host, GREEN, msg, RESET)
+log_downstream = lambda msg, host="": logger.info("%s%s<-- %s%s", host, RED, msg, RESET)
+
+BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = ["\033[{}m".format(30 + i) for i in range(8)]
+RESET = "\033[0m"
+
+
+async def handle_connection(reader, writer, to):
+    remote_addr = writer.get_extra_info("peername")
+    logger.info("New connection from %s", remote_addr)
+
+    to_host, to_port = to.split(":")
+    try:
+        remote_reader, remote_writer = await asyncio.open_connection(to_host, int(to_port))
+    except Exception as e:
+        logger.error("Failed to connect to %s: %s", to, e)
+        writer.close()
+        return
+
+    async def remote_to_client():
+        while True:
+            line = await remote_reader.readline()
+            if not line:
+                break
+            log_downstream(line.decode().strip())
+            writer.write(line)
+            await writer.drain()
+
+    asyncio.create_task(remote_to_client())
+
+    while True:
+        line = await reader.readline()
+        if not line:
+            break
+        log_upstream(line.decode().strip())
+        remote_writer.write(line)
+        await remote_writer.drain()
+
+    remote_writer.close()
+
+
+async def run_proxy(serve, to):
+    serve_host, serve_port = serve.split(":") if ":" in serve else ("0.0.0.0", serve)
+    handler = lambda reader, writer: handle_connection(reader, writer, to)
+    logger.info("Serving on %s, forwarding to %s", serve, to)
+    server = await asyncio.start_server(handler, serve_host, int(serve_port))
+    async with server:
+        await server.serve_forever()
+
+
+async def run_connect(hosts, user_agent, follow, user):
+    async def connect(remote, user_agent, user, follow):
+        try:
+            host, port = remote.split(":")
+            reader, writer = await asyncio.open_connection(host, int(port))
+
+            subscribe = json.dumps({"id": 1, "method": "mining.subscribe", "params": [user_agent]}) + "\n"
+            writer.write(subscribe.encode())
+            await writer.drain()
+            log_upstream(subscribe.strip(), remote + " ")
+
+            line = await reader.readline()
+            log_downstream(line.decode().strip(), remote + " ")
+
+            authorize = json.dumps({"id": 2, "method": "mining.authorize", "params": [user, "x"]}) + "\n"
+            writer.write(authorize.encode())
+            await writer.drain()
+            log_upstream(authorize.strip(), remote + " ")
+
+            async def read_and_log():
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        break
+                    log_downstream(line.decode().strip(), remote + " ")
+
+            wait = 24 * 60 * 60 if follow else 5
+            await asyncio.wait_for(read_and_log(), wait)
+
+        except asyncio.TimeoutError:
+            writer.close()
+
+        except Exception as e:
+            logger.error("Failed to connect to %s: %s", remote, e)
+            logger.exception(e)
+
+    await asyncio.gather(*[connect(remote, user_agent, user, follow) for remote in hosts.split(",")])
+
+
+def create_args_parser():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    proxy = subparsers.add_parser("proxy", help="Run a proxy")
+    proxy.add_argument("--serve", help="Serve on this address", default="0.0.0.0:8876")
+    proxy.add_argument("--to", help="Forward to this address", required=True)
+    connect = subparsers.add_parser("connect", help="Connect to servers")
+    connect.add_argument("hosts", help="Hosts to connect to, comma sperated")
+    connect.add_argument("-a", "--user-agent", help="User agent to use", default="cpuminer/1.0.1")
+    connect.add_argument("-f", "--follow", action="store_true", help="Follow the server outputs", default=False)
+    connect.add_argument("-u", "--user", help="User to use", default="qiqi.1")
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_args_parser()
+    args = parser.parse_args()
+    if args.command == "proxy":
+        asyncio.run(run_proxy(args.serve, args.to))
+    elif args.command == "connect":
+        asyncio.run(run_connect(args.hosts, args.user_agent, args.follow, args.user))
+    else:
+        parser.print_help()
