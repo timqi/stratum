@@ -62,24 +62,71 @@ async def run_proxy(serve, to):
         await server.serve_forever()
 
 
-async def run_connect(hosts, user_agent, follow, user):
-    async def connect(remote, user_agent, user, follow):
+async def do_legacy_conn(writeline, readline, user_agent, user):
+    await writeline(json.dumps({"id": 1, "method": "mining.subscribe", "params": [user_agent]}))
+    await readline()
+    await writeline(json.dumps({"id": 2, "method": "mining.authorize", "params": [user, "x"]}))
+
+
+async def do_cn_conn(writeline, readline, user_agent, user):
+    await writeline(
+        json.dumps(
+            {
+                "id": 1,
+                "method": "login",
+                "params": {"login": user, "pass": "x", "agent": user_agent},
+                "jsonrpc": "2.0",
+            }
+        )
+    )
+    s = await readline()
+    id = json.loads(s).get("result", {}).get("id", 0)
+    job_id = json.loads(s).get("result", {}).get("job", {}).get("job_id", 0)
+    await writeline(json.dumps({"id": 2, "jsonrpc": "2.0", "method": "keepalived", "params": {"id": id}}))
+
+    await asyncio.sleep(2)
+    await writeline(
+        json.dumps(
+            {
+                "id": 3,
+                "method": "submit",
+                "params": {
+                    "id": str(id),
+                    "job_id": str(job_id),
+                    "nonce": "dc280100",
+                    "result": "8ac6df2577eec0efaabf47f87cc2c2cc561d49b9b4d4c1046c34557b21a40100",
+                    "algo": "dynexsolve230",
+                    "mallob": "1275eb3aa6d5d691ce5dc5a6090e2b8152d013a7536cb1e11b6b740b38072112",
+                    "POUW_DATA": "ceb2cc9d54fc4bc12a8a2a6b4af665f38269f20d5decbe77b0674b30ee70ab9311b4a552689911b7b69406dbd502d7e6f45f2c45e60ecd11b9f9b52fe0f25f27175f143c584d5f6381122c6473555ec951e8241290682bf8c3e3600514b27fb5a3bfd5215dd78b3f4c11c56c653cc9f6",
+                },
+            }
+        )
+    )
+
+
+async def run_connect(hosts, user_agent, follow, user, type="legacy"):
+    if type == "cn":
+        func = do_cn_conn
+    else:
+        func = do_legacy_conn
+
+    async def connect(remote, func):
         try:
             host, port = remote.split(":")
             reader, writer = await asyncio.open_connection(host, int(port))
 
-            subscribe = json.dumps({"id": 1, "method": "mining.subscribe", "params": [user_agent]}) + "\n"
-            writer.write(subscribe.encode())
-            await writer.drain()
-            log_upstream(subscribe.strip(), remote + " ")
+            async def writeline(line):
+                writer.write(line.encode() + b"\n")
+                await writer.drain()
+                log_upstream(line.strip(), remote + " ")
 
-            line = await reader.readline()
-            log_downstream(line.decode().strip(), remote + " ")
+            async def readline():
+                line = await reader.readline()
+                s = line.decode().strip()
+                log_downstream(s, remote + " ")
+                return s
 
-            authorize = json.dumps({"id": 2, "method": "mining.authorize", "params": [user, "x"]}) + "\n"
-            writer.write(authorize.encode())
-            await writer.drain()
-            log_upstream(authorize.strip(), remote + " ")
+            await func(writeline, readline, user_agent, user)
 
             async def read_and_log():
                 while True:
@@ -91,14 +138,14 @@ async def run_connect(hosts, user_agent, follow, user):
             wait = 24 * 60 * 60 if follow else 5
             await asyncio.wait_for(read_and_log(), wait)
 
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             writer.close()
-
+            logger.error("Timeout, abort: %s", remote)
         except Exception as e:
             logger.error("Failed to connect to %s: %s", remote, e)
             logger.exception(e)
 
-    await asyncio.gather(*[connect(remote, user_agent, user, follow) for remote in hosts.split(",")])
+    await asyncio.gather(*[connect(remote, func) for remote in hosts.split(",")])
 
 
 def create_args_parser():
@@ -112,6 +159,7 @@ def create_args_parser():
     connect.add_argument("-a", "--user-agent", help="User agent to use", default="cpuminer/1.0.1")
     connect.add_argument("-f", "--follow", action="store_true", help="Follow the server outputs", default=False)
     connect.add_argument("-u", "--user", help="User to use", default="qiqi.1")
+    connect.add_argument("-t", "--type", default="legacy", choices=["legacy", "cn"])
     return parser
 
 
@@ -121,6 +169,6 @@ if __name__ == "__main__":
     if args.command == "proxy":
         asyncio.run(run_proxy(args.serve, args.to))
     elif args.command == "connect":
-        asyncio.run(run_connect(args.hosts, args.user_agent, args.follow, args.user))
+        asyncio.run(run_connect(args.hosts, args.user_agent, args.follow, args.user, args.type))
     else:
         parser.print_help()
