@@ -32,13 +32,19 @@ async def handle_connection(reader, writer, to):
         return
 
     async def remote_to_client():
-        while True:
-            line = await remote_reader.readline()
-            if not line:
-                break
-            log_downstream(line.decode().strip())
-            writer.write(line)
-            await writer.drain()
+        try:
+            while True:
+                line = await remote_reader.readline()
+                if not line:
+                    break
+                log_downstream(line.decode().strip())
+                writer.write(line)
+                await writer.drain()
+        except Exception as e:
+            logger.error("%sError in remote_to_client: %s%s", YELLOW, e, RESET)
+            writer.close()
+        finally:
+            remote_writer.close()
 
     asyncio.create_task(remote_to_client())
 
