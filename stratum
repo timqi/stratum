@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 
 logging.basicConfig(
     format="[%(asctime)s] %(message)s",
@@ -118,6 +119,7 @@ async def run_connect(hosts, user_agent, follow, user, type="legacy"):
 
     async def connect(remote, func):
         try:
+            remote = format_host(remote)
             host, port = remote.split(":")
             reader, writer = await asyncio.open_connection(host, int(port))
 
@@ -154,6 +156,12 @@ async def run_connect(hosts, user_agent, follow, user, type="legacy"):
     await asyncio.gather(*[connect(remote, func) for remote in hosts.split(",")])
 
 
+def format_host(host):
+    if re.findall(r"^:\d+", host):
+        return "127.0.0.1" + host
+    return host
+
+
 def create_args_parser():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
@@ -173,7 +181,7 @@ if __name__ == "__main__":
     parser = create_args_parser()
     args = parser.parse_args()
     if args.command == "proxy":
-        asyncio.run(run_proxy(args.serve, args.to))
+        asyncio.run(run_proxy(format_host(args.serve), format_host(args.to)))
     elif args.command == "connect":
         asyncio.run(run_connect(args.hosts, args.user_agent, args.follow, args.user, args.type))
     else:

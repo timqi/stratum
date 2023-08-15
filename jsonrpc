@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import re
+import urllib.parse
+import urllib.request
+
+
+BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = ["\033[{}m".format(30 + i) for i in range(8)]
+RESET = "\033[0m"
+
+
+def request(url, method, params):
+    data = {"id": 1, "jsonrpc": "2.0", "method": method, "params": params}
+    print(f"{MAGENTA}Request:{RESET}", json.dumps(data, indent=4))
+    response = urllib.request.urlopen(
+        urllib.request.Request(
+            url,
+            data=json.dumps(data).encode("utf8"),
+            headers={"content-type": "application/json"},
+        )
+    )
+    try:
+        resp_obj = json.loads(response.read().decode("utf8"))
+    except Exception as e:
+        print(f"{RED}Error:{RESET}", e)
+        return
+    if "error" in resp_obj:
+        print(f"{RED}Error:{RESET}", json.dumps(resp_obj["error"], indent=4))
+    else:
+        print(f"{MAGENTA}Response:{RESET}", json.dumps(resp_obj.get("result"), indent=4))
+
+
+def normalize_param_value(value):
+    try:
+        value = int(value)
+    except ValueError:
+        try:
+            value = float(value)
+        except ValueError:
+            pass
+    return value.strip('"').strip("'") if isinstance(value, str) else value
+
+
+def format_args(args):
+    url = args.url
+    if re.findall(r"^:\d+", url):
+        url = "http://127.0.0.1" + url
+    elif not url.startswith("http"):
+        url = "http://" + url
+    args.url = url
+
+    if args.cryptonight:
+        params = {}
+        for p in args.params:
+            k, v = p.split("=")
+            params[k] = normalize_param_value(v)
+        args.params = params
+    else:
+        args.params = [normalize_param_value(p) for p in args.params]
+    # print(args)
+    return args
+
+
+def create_args_parser():
+    parser = argparse.ArgumentParser(description="JSON-RPC client")
+    parser.add_argument("url", default="127.0.0.1", help="host:port to connect to, default: http://127.0.0.1:80")
+    parser.add_argument("method", help="method to call")
+    parser.add_argument("params", help="params to call", nargs="*")
+    parser.add_argument("-cn", "--cryptonight", action="store_true", help="use XMR format", default=False)
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_args_parser()
+    args = parser.parse_args()
+    args = format_args(args)
+    request(args.url, args.method, args.params)
