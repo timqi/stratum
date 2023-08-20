@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+import argparse
+import cgi
+import concurrent.futures
+import http.server
+import os
+import socketserver
+import sys
+
+PORT = UPLOAD_DIR = INDEX_DIR = None
+MAX_WORKERS = 10
+
+MESSAGE = r"""Use command to upload file:
+curl -XPOST -F"file=@/path/to/file" http://host:port/
+"""
+
+
+def realpath(path):
+    return os.path.realpath(os.path.expanduser(path))
+
+
+class FileHandler(http.server.BaseHTTPRequestHandler):
+    def endwith(self, code: int, message: bytes):
+        self.send_response(code)
+        self.end_headers()
+        self.wfile.write(message)
+
+    def do_POST(self):
+        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST"})
+        field = form["file"]
+        if isinstance(field, list):
+            if len(field) == 0:
+                return self.endwith(400, b"No file specified")
+            for f in field:
+                if not f.file:
+                    return self.endwith(400, b"No file specified")
+                with open(os.path.join(UPLOAD_DIR, f.filename), "wb") as f:
+                    f.write(f.file.read())
+            return self.endwith(200, b"Files uploaded successfully")
+        elif field.file:
+            with open(os.path.join(UPLOAD_DIR, field.filename), "wb") as f:
+                f.write(field.file.read())
+            return self.endwith(200, b"File uploaded successfully")
+        else:
+            return self.endwith(400, b"No file specified")
+
+    def do_GET(self):
+        if not INDEX_DIR:
+            return self.endwith(403, b"Indexing directory not allowed")
+
+        sub = self.path.split("?", 1)[0].strip("/")
+        path = os.path.join(INDEX_DIR, sub)
+        if os.path.isdir(path):
+            files = [MESSAGE, f"Files in directory: {len(os.listdir(path))}"]
+            files += [
+                f"- {'' if os.path.isdir(os.path.join(path, f)) else 'f'} {'/' if sub else ''}{sub}/{f}"
+                for f in os.listdir(path)
+            ]
+            return self.endwith(200, "\n".join(files).encode())
+        elif os.path.isfile(path):
+            with open(path, "rb") as f:
+                return self.endwith(200, f.read())
+        else:
+            return self.endwith(404, b"Directory not found")
+
+
+class ThreadPoolTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+
+    def process_request(self, request, client_address):
+        self.executor.submit(self.process_request_thread, request, client_address)
+
+    def handle_error(self, request, client_address):
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        if exc_type is ConnectionResetError:
+            return
+        super().handle_error(request, client_address)
+
+
+def main():
+    global PORT, UPLOAD_DIR, INDEX_DIR
+    if not os.path.exists(UPLOAD_DIR):
+        os.makedirs(UPLOAD_DIR)
+    if INDEX_DIR and not os.path.exists(INDEX_DIR):
+        INDEX_DIR = None
+    with ThreadPoolTCPServer(("", PORT), FileHandler) as httpd:
+        print("Serving at port", PORT)
+        print("Upload directory:", UPLOAD_DIR)
+        print("Index directory:", INDEX_DIR)
+        print("MESSAGE:", MESSAGE)
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("KeyboardInterrupt")
+
+
+def create_args_parer():
+    parser = argparse.ArgumentParser(description="File server")
+    parser.add_argument("-p", "--port", type=int, default=3350, help="port number")
+    parser.add_argument("-d", "--upload", type=str, default="~/Downloads/upload", help="upload directory")
+    parser.add_argument("-i", "--index", type=str, default=None, help="index directory")
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_args_parer()
+    args = parser.parse_args()
+    PORT = args.port
+    UPLOAD_DIR = realpath(args.upload)
+    INDEX_DIR = realpath(args.index) if args.index is not None else None
+    main()
